@@ -57,6 +57,7 @@ Limites connues :
 ```bash
 node check.js --dry-run   # lit les pages, ne touche ni à l'état ni à Telegram
 node check.js             # vrai passage (envoie l'alerte si changement)
+node check.js --full-report  # envoie la liste complète des prix une fois (sans toucher à l'état)
 ```
 
 ## WhatsApp (plus tard)
