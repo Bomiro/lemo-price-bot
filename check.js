@@ -4,7 +4,9 @@
 // and compares them with the last known state in prices.json.
 // On change -> sends a Telegram message. First run only records the baseline.
 // No dependencies: Node 18+ (global fetch).
-// Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID. Flags: --dry-run (no send, no state write)
+// Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+// Flags: --dry-run (no send, no state write) · --full-report (send the full
+// price list once, no state change — on-demand test / digest)
 
 const fs = require('fs');
 const path = require('path');
@@ -92,6 +94,83 @@ function brandOf(name, brands) {
   return brands.find((b) => n.includes(norm(b))) || null;
 }
 
+// Fetch + parse all products of one source (paginated when configured).
+// Returns { products, error }.
+async function fetchSourceProducts(source) {
+  let products = [];
+  try {
+    if (source.paginate) {
+      // Bringo-style pagination: page=1..N, limit=100, stop when a page is short/empty.
+      for (let page = 1; page <= 5; page++) {
+        const sep = source.url.includes('?') ? '&' : '?';
+        const url = `${source.url}${sep}page=${page}&limit=100`;
+        const text = stripTags(await fetchText(url));
+        const found = parseProducts(text);
+        console.log(`  page ${page}: ${found.length} products`);
+        products = products.concat(found);
+        if (found.length < 100) break;
+      }
+    } else {
+      const text = stripTags(await fetchText(source.url));
+      products = parseProducts(text);
+      if (products.length === 0 && (source.products || []).length > 0) {
+        // Fallback to exact-name matching (e.g. Glovo pages).
+        for (const p of source.products) {
+          const price = findPrice(text, p);
+          if (price !== null) products.push({ name: p, price });
+        }
+      }
+    }
+  } catch (e) {
+    return { products: [], error: e.message };
+  }
+  return { products, error: null };
+}
+
+// --full-report: send the whole current price list (grouped by store + brand).
+// Does not read or write prices.json.
+async function fullReport() {
+  const seen = new Set();
+  const stores = new Map(); // storeKey -> { label, brands: Map<brand, items[]> }
+  for (const source of CONFIG.sources) {
+    if (source.disabled) continue;
+    console.log(`[fetch] ${source.label}`);
+    const { products, error } = await fetchSourceProducts(source);
+    if (error) {
+      console.log(`[error] ${source.label}: ${error}`);
+      continue;
+    }
+    const storeKey = source.store || source.id;
+    if (!stores.has(storeKey)) stores.set(storeKey, { label: source.label, brands: new Map() });
+    const store = stores.get(storeKey);
+    for (const { name, price } of products) {
+      const brand = source.brands ? brandOf(name, source.brands) : null;
+      if (source.brands && !brand) continue;
+      const key = `${storeKey} :: ${name}`;
+      if (seen.has(key) || price <= 0) continue;
+      seen.add(key);
+      if (!store.brands.has(brand)) store.brands.set(brand, []);
+      store.brands.get(brand).push({ name, price });
+    }
+  }
+  const lines = [
+    `📋 Tous les prix — LEMO (Tétouan)`,
+    `📅 ${new Date().toISOString().slice(0, 10)}`,
+  ];
+  for (const { label, brands } of stores.values()) {
+    lines.push('', `🏪 ${label}`);
+    for (const [brand, items] of brands) {
+      lines.push(`— ${brand}`);
+      for (const { name, price } of items) {
+        lines.push(`• ${name} — ${price.toFixed(2)} MAD`);
+      }
+    }
+  }
+  const msg = lines.join('\n');
+  console.log(`[report] ${msg.length} chars, ${seen.size} products`);
+  await sendTelegram(msg);
+}
+
 async function sendTelegram(text) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -112,6 +191,10 @@ async function sendTelegram(text) {
 }
 
 async function main() {
+  if (process.argv.includes('--full-report')) {
+    await fullReport();
+    return;
+  }
   const state = loadState();
   const changes = [];
   const missing = [];
@@ -124,32 +207,9 @@ async function main() {
       continue;
     }
     console.log(`[fetch] ${source.label}`);
-    let products = [];
-    try {
-      if (source.paginate) {
-        // Bringo-style pagination: page=1..N, limit=100, stop when a page is short/empty.
-        for (let page = 1; page <= 5; page++) {
-          const sep = source.url.includes('?') ? '&' : '?';
-          const url = `${source.url}${sep}page=${page}&limit=100`;
-          const text = stripTags(await fetchText(url));
-          const found = parseProducts(text);
-          console.log(`  page ${page}: ${found.length} products`);
-          products = products.concat(found);
-          if (found.length < 100) break;
-        }
-      } else {
-        const text = stripTags(await fetchText(source.url));
-        products = parseProducts(text);
-        if (products.length === 0 && (source.products || []).length > 0) {
-          // Fallback to exact-name matching (e.g. Glovo pages).
-          for (const p of source.products) {
-            const price = findPrice(text, p);
-            if (price !== null) products.push({ name: p, price });
-          }
-        }
-      }
-    } catch (e) {
-      console.log(`[error] ${source.label}: ${e.message}`);
+    const { products, error } = await fetchSourceProducts(source);
+    if (error) {
+      console.log(`[error] ${source.label}: ${error}`);
       missing.push(`${source.label} (fetch failed)`);
       continue;
     }
