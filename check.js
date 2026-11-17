@@ -94,6 +94,42 @@ function brandOf(name, brands) {
   return brands.find((b) => n.includes(norm(b))) || null;
 }
 
+// Short display name for the report: drop generic words + the brand word,
+// keep variant + size. "Eau Gazeuse Orange Oulmès 25cl" -> "Orange 25cl".
+// verbose=true keeps "Minérale"/"Gazeuse" (used only to tell apart two
+// products that would otherwise share the same short name).
+const DROP_WORDS = new Set([
+  'eau', 'minerale', 'de', 'table', 'gazeuse', 'petillante', 'boisson',
+  'bouteille', 'en', 'verre', 'pet', 'canette', 'classique', 'bulles', 'fruitees',
+]);
+function shortName(name, brand, verbose = false) {
+  const brandWords = new Set(norm(brand).split(' '));
+  const drop = verbose
+    ? new Set([...DROP_WORDS].filter((w) => w !== 'minerale' && w !== 'gazeuse'))
+    : DROP_WORDS;
+  const tokens = name.split(/\s+/);
+  const kept = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (drop.has(norm(t)) || brandWords.has(norm(t))) continue;
+    // merge number + unit tokens ("25" + "CL" -> "25cl")
+    if (/^\d+([,.]\d+)?$/.test(t) && i + 1 < tokens.length && /^(cl|l)$/i.test(tokens[i + 1])) {
+      kept.push(t + (tokens[i + 1].toLowerCase() === 'l' ? 'L' : 'cl'));
+      i++;
+      continue;
+    }
+    kept.push(t.replace(/\.$/, ''));
+  }
+  return kept
+    .map((t) =>
+      t
+        .replace(/^(\d+[,.]?\d*)cl$/i, (_, a) => `${a}cl`)
+        .replace(/^(\d+[,.]?\d*)l$/i, (_, a) => `${a}L`)
+    )
+    .join(' ')
+    .trim();
+}
+
 // Fetch + parse all products of one source (paginated when configured).
 // Returns { products, error }.
 async function fetchSourceProducts(source) {
@@ -154,17 +190,33 @@ async function fullReport() {
     }
   }
   const lines = [
-    `📋 Tous les prix — LEMO (Tétouan)`,
+    `📋 Prix LEMO — Tétouan`,
     `📅 ${new Date().toISOString().slice(0, 10)}`,
   ];
   for (const { label, brands } of stores.values()) {
-    lines.push('', `🏪 ${label}`);
+    lines.push('', `🏪 ${label} — prix en MAD`, '```');
     for (const [brand, items] of brands) {
-      lines.push(`— ${brand}`);
-      for (const { name, price } of items) {
-        lines.push(`• ${name} — ${price.toFixed(2)} MAD`);
+      // short names; colliding sizes: if the full names are identical the
+      // pricier one is the pack, otherwise use the verbose name
+      const shorts = items.map(({ name, price }) => ({ name, short: shortName(name, brand), price }));
+      const byShort = {};
+      for (const s of shorts) (byShort[s.short] = byShort[s.short] || []).push(s);
+      for (const group of Object.values(byShort)) {
+        if (group.length < 2) continue;
+        const sameName = group.every((s) => norm(s.name) === norm(group[0].name));
+        group.sort((a, b) => a.price - b.price);
+        if (sameName) {
+          for (let i = 1; i < group.length; i++) group[i].short += ' pack';
+        } else {
+          for (const s of group) s.short = shortName(s.name, brand, true);
+        }
       }
+      const width = Math.max(...shorts.map((s) => s.short.length));
+      lines.push(brand.toUpperCase());
+      for (const s of shorts) lines.push(`${s.short.padEnd(width + 2)}${s.price.toFixed(2)}`);
+      lines.push('');
     }
+    lines.push('```');
   }
   const msg = lines.join('\n');
   console.log(`[report] ${msg.length} chars, ${seen.size} products`);
