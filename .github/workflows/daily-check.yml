@@ -1,0 +1,33 @@
+name: LEMO price check
+
+# Runs the price check once a day. Needs two repo secrets:
+#   TELEGRAM_BOT_TOKEN — token from @BotFather
+#   TELEGRAM_CHAT_ID   — group/chat id where alerts go
+# The state file (prices.json) is committed back so the next run can compare.
+on:
+  schedule:
+    - cron: '0 9 * * *' # 09:00 UTC, every day
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check prices
+        run: node check.js
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Save price state
+        run: |
+          git config user.name "lemo-price-bot"
+          git config user.email "lemo-price-bot@local"
+          git add prices.json
+          git diff --cached --quiet || (git commit -m "price state $(date -u +%F)" && git push)
